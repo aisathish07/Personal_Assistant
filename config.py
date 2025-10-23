@@ -9,59 +9,41 @@ load_dotenv()
 logger = logging.getLogger("AI_Assistant.Config")
 
 class Config:
-    """Windows-compatible configuration class with better error handling and validation"""
+    """Enhanced configuration class with better error handling and validation"""
     
     # ================== Core Configuration ==================
     LOCAL_ONLY = bool(os.getenv("LOCAL_ONLY", "").lower() in {"1", "true", "yes"})
     
     # ================== API Keys & Credentials ==================
     # All API keys should be loaded from environment variables
-    ACCESS_KEY = os.getenv("PICOVOICE_ACCESS_KEY", "")
-    OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY", "")
-    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-    NEWSAPI_API_KEY = os.getenv("NEWSAPI_API_KEY", "")
-    SLACK_API_TOKEN = os.getenv("SLACK_API_TOKEN", "")
+    ACCESS_KEY = os.getenv("PICOVOICE_ACCESS_KEY")
+    OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
+    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+    NEWSAPI_API_KEY = os.getenv("NEWSAPI_API_KEY")
+    SLACK_API_TOKEN = os.getenv("SLACK_API_TOKEN")
     
     # ================== Email Configuration ==================
-    EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS", "")
-    EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
-    EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER", "")
+    EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
+    EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
+    EMAIL_SMTP_SERVER = os.getenv("EMAIL_SMTP_SERVER")
     EMAIL_SMTP_PORT = int(os.getenv("EMAIL_SMTP_PORT", "465"))
     
     # ================== TTS Configuration ==================
-    # Set a default PIPER path that's more likely to exist
-    PIPER_EXECUTABLE_PATH = os.getenv("PIPER_EXECUTABLE_PATH", "")
-    
-    # If PIPER path is not set, try to find it in common locations
-    if not PIPER_EXECUTABLE_PATH and sys.platform.startswith('win'):
-        possible_paths = [
-            "C:\\Program Files\\piper\\piper.exe",
-            "C:\\Users\\%USERNAME%\\AppData\\Local\\piper\\piper.exe",
-            "piper\\piper.exe",
-            "piper.exe",
-        ]
-        
-        for path in possible_paths:
-            expanded_path = os.path.expandvars(path)
-            if os.path.exists(expanded_path):
-                PIPER_EXECUTABLE_PATH = expanded_path
-                logger.info(f"Found PIPER executable at: {expanded_path}")
-                break
+    PIPER_EXECUTABLE_PATH = os.getenv("PIPER_EXECUTABLE_PATH")
     
     # ================== LLM Configuration ==================
     LLM_PRIORITY = ["gemini", "ollama", "lm_studio"]
     
     # Gemini Models (validated and available)
     GEMINI_MODELS = [
-       "gemini-1.0-pro",       # stable
-   "gemini-1.0-flash",     # stable, cheaper
-    "gemini-2.0-pro",       # new, may or may not be available
-   "gemini-2.0-flash",
-    "gemini-2.5-pro",       # experimental / AI Studio only
-    "gemini-2.5-flash"
-    ],     # Fast, legacy
-    
+         "gemini-1.0-pro",       # stable
+        "gemini-1.0-flash",     # stable, cheaper
+        "gemini-2.0-pro",       # new, may or may not be available
+        "gemini-2.0-flash",
+        "gemini-2.5-pro",       # experimental / AI Studio only
+        "gemini-2.5-flash"
+    ]
     
     # Local LLM Models
     LM_STUDIO_MODELS = [
@@ -95,14 +77,7 @@ class Config:
     # Wake word configuration
     BUILT_IN_KEYWORD = "jarvis"
     CUSTOM_WAKE_WORD_PATH = os.getenv("CUSTOM_WAKE_WORD_PATH", "hey-jarvis_en_windows_v3_0_0.ppn")
-    
-    # Check if custom wake word exists, if not use built-in
-    if not os.path.exists(CUSTOM_WAKE_WORD_PATH):
-        logger.warning(f"Custom wake word file not found: {CUSTOM_WAKE_WORD_PATH}")
-        logger.info("Falling back to built-in wake word")
-        USE_CUSTOM_WAKE_WORD = False
-    else:
-        USE_CUSTOM_WAKE_WORD = True
+    USE_CUSTOM_WAKE_WORD = bool(os.getenv("USE_CUSTOM_WAKE_WORD", "true").lower() in {"1", "true", "yes"})
     
     # ================== Audio Settings ==================
     SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", "16000"))
@@ -170,9 +145,9 @@ class Config:
         for directory in directories:
             try:
                 os.makedirs(directory, exist_ok=True)
-                logger.debug(f"Directory created/verified: {directory}")
+                logger.debug(f"✅ Directory created/verified: {directory}")
             except Exception as e:
-                logger.error(f"Failed to create directory {directory}: {e}")
+                logger.error(f"❌ Failed to create directory {directory}: {e}")
                 raise
     
     @classmethod
@@ -189,19 +164,17 @@ class Config:
         for key_name, key_value in required_keys.items():
             if not key_value:
                 if cls.LOCAL_ONLY and key_name == "GEMINI_API_KEY":
-                    logger.info(f"{key_name} not set but LOCAL_ONLY mode enabled")
+                    logger.info(f"ℹ️  {key_name} not set but LOCAL_ONLY mode enabled")
                 else:
                     issues.append(f"Missing required API key: {key_name}")
         
         # Validate paths
         if cls.PIPER_EXECUTABLE_PATH and not os.path.exists(cls.PIPER_EXECUTABLE_PATH):
-            # Don't fail on PIPER path - it's optional
-            logger.warning(f"PIPER executable not found: {cls.PIPER_EXECUTABLE_PATH}")
-            logger.info("TTS will fall back to other engines")
+            issues.append(f"PIPER executable not found: {cls.PIPER_EXECUTABLE_PATH}")
         
         if cls.USE_CUSTOM_WAKE_WORD and not os.path.exists(cls.CUSTOM_WAKE_WORD_PATH):
             logger.warning(f"Custom wake word file not found: {cls.CUSTOM_WAKE_WORD_PATH}")
-            logger.info("Falling back to built-in wake word")
+            logger.warning("Falling back to built-in wake word")
         
         # Validate numeric configurations
         if cls.GEMINI_TIMEOUT <= 0:
@@ -212,12 +185,12 @@ class Config:
         
         # Log validation results
         if issues:
-            logger.error("Configuration validation failed:")
+            logger.error("❌ Configuration validation failed:")
             for issue in issues:
                 logger.error(f"  • {issue}")
             return False
         else:
-            logger.info("Configuration validation passed")
+            logger.info("✅ Configuration validation passed")
             return True
     
     @classmethod
@@ -252,13 +225,13 @@ class Config:
         
         # Optimize based on memory
         if memory_gb < 8:
-            logger.info("Low memory system detected - applying optimizations")
+            logger.info("🔋 Low memory system detected - applying optimizations")
             cls.WEB_AGENT_MAX_MEMORY_MB = min(cls.WEB_AGENT_MAX_MEMORY_MB, 300)
             cls.MAX_CONCURRENT_TASKS = 1
             cls.WEB_AGENT_VISION_ENABLED = False
             cls.MAX_WORKER_THREADS = min(cls.MAX_WORKER_THREADS, 2)
         elif memory_gb >= 16:
-            logger.info("High memory system detected - enabling full features")
+            logger.info("⚡ High memory system detected - enabling full features")
             cls.WEB_AGENT_MAX_MEMORY_MB = max(cls.WEB_AGENT_MAX_MEMORY_MB, 800)
             cls.MAX_CONCURRENT_TASKS = max(cls.MAX_CONCURRENT_TASKS, 3)
             cls.WEB_AGENT_VISION_ENABLED = True
@@ -268,28 +241,13 @@ class Config:
         if cpu_count < 4:
             cls.MAX_WORKER_THREADS = min(cls.MAX_WORKER_THREADS, 2)
         
-        logger.info(f"Optimized for system: {memory_gb:.1f}GB RAM, {cpu_count} CPU cores")
+        logger.info(f"📊 Optimized for system: {memory_gb:.1f}GB RAM, {cpu_count} CPU cores")
 
 # Initialize configuration
 try:
     Config.setup_directories()
     Config.validate_configuration()
     Config.optimize_for_system()
-    
-    # Create a minimal .env file if it doesn't exist
-    if not os.path.exists(".env"):
-        logger.info("Creating minimal .env file...")
-        with open(".env", "w") as f:
-            f.write("# Jarvis AI Assistant Configuration\n")
-            f.write("# Add your API keys here\n")
-            f.write("# PICOVOICE_ACCESS_KEY=your_key_here\n")
-            f.write("# GEMINI_API_KEY=your_key_here\n")
-            f.write("# ELEVENLABS_API_KEY=your_key_here\n")
-            f.write("\n# Optional configurations\n")
-            f.write("# PIPER_EXECUTABLE_PATH=\n")
-            f.write("# CUSTOM_WAKE_WORD_PATH=\n")
-        logger.info("Created .env file - please add your API keys")
-        
 except Exception as e:
     logger.error(f"Failed to initialize configuration: {e}")
     raise

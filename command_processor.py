@@ -504,11 +504,22 @@ class CommandProcessor:
         return text
 
     def _parse_command_nlp(self, text: str) -> Tuple[str, Dict[str, Any]]:
-        txt = text.lower()
+        """Enhanced NLP-based parsing using spaCy."""
+        if not self.nlp:
+            return "unknown", {}
+    
+        doc = self.nlp(text.lower())
+    
+    # Extract entities
+        entities = {ent.label_: ent.text for ent in doc.ents}
+    
+    # Check for intent keywords
+        text_lower = text.lower()
         for intent, keywords in self.intents.items():
-            if any(k in txt for k in keywords):
-                return intent, {}
-        return "unknown", {}
+            if any(keyword in text_lower for keyword in keywords):
+                return intent, entities
+    
+        return "unknown", entities
 
     def _build_context_for_plugins(self) -> Dict[str, Any]:
         return {"recent": list(self.context_window), "summary_memory": self.summary_memory}

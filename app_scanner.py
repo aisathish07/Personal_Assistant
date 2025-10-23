@@ -1,10 +1,8 @@
-# app_scanner.py  –  debugged & duplicate-free
 import os
 import winreg
 import json
 import logging
 import subprocess
-import stat
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional
@@ -27,56 +25,8 @@ class AppManager:
         self.apps = self._load_apps_with_cache()
         logger.info(f"Initialized with {len(self.apps)} applications found.")
 
-    # ------------------------------------------------------------------
-    #  NEW:  registry-modification check  (cheap cache invalidation)
-    # ------------------------------------------------------------------
-    def _system_app_modified_time(self) -> datetime:
-        """Return newest mtime among Uninstall keys → proxy for 'apps changed'."""
-        keys = [
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-        ]
-        newest = datetime.min
-        for k in keys:
-            try:
-                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, k) as h:
-                    t = datetime.fromtimestamp(os.stat(h.handle).st_mtime)
-                    newest = max(newest, t)          # ← fixed syntax
-            except Exception:
-                pass
-        return newest
-
-    # ------------------------------------------------------------------
-    #  Cache loader  (skip full scan if nothing changed)
-    # ------------------------------------------------------------------
-    def _load_apps_with_cache(self) -> Dict[str, str]:
-        """Load apps from cache or rescan only if system changed."""
-        if self.cache_file.exists():
-            cache_age = datetime.now() - datetime.fromtimestamp(self.cache_file.stat().st_mtime)
-            if cache_age < self.cache_duration:
-                #  ----  quick invalidation check  ----
-                if datetime.fromtimestamp(self.cache_file.stat().st_mtime) > self._system_app_modified_time():
-                    logger.info("Apps unchanged – using cache")
-                    with self.cache_file.open(encoding="utf-8") as f:
-                        return json.load(f)
-
-        #  ----  full scan  ----
-        apps = {}
-        apps.update(self._scan_registry_apps())
-        apps.update(self._scan_start_menu())
-        apps.update(self._scan_store_apps())
-        apps.update(self.memory_manager.get_all_apps())
-
-        #  ----  save cache  ----
-        self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with self.cache_file.open("w", encoding="utf-8") as f:
-            json.dump(apps, f, indent=4)
-        logger.info(f"Saved {len(apps)} apps to cache.")
-        return apps if apps else {}
-    # ------------------------------------------------------------------
-    #  remaining methods unchanged (kept as-is)
-    # ------------------------------------------------------------------
     def rescan_apps(self) -> str:
+        """Deletes the cache and rescans for all applications."""
         try:
             if self.cache_file.exists():
                 self.cache_file.unlink()
@@ -87,34 +37,137 @@ class AppManager:
             logger.error(f"Error deleting cache file: {e}")
             return "There was an error while trying to rescan applications."
 
-    def _load_custom_apps(self) -> None:
+    def _load_custom_apps(self):
+        """Loads app paths from a custom JSON file and adds them to memory."""
         custom_apps_path = Path(__file__).with_name("custom_apps.json")
         if custom_apps_path.exists():
             try:
                 with custom_apps_path.open("r", encoding="utf-8") as f:
                     custom_apps = json.load(f)
                     for name, path in custom_apps.items():
-                        if name and path:
-                            self.memory_manager.add_app(name.lower(), path)
-            except (json.JSONDecodeError, OSError, TypeError) as e:
+                        self.memory_manager.add_app(name.lower(), path)
+            except (json.JSONDecodeError, OSError) as e:
                 logger.error(f"Error reading {custom_apps_path}: {e}")
 
+    def _load_apps_with_cache(self) -> Dict[str, str]:
+        """Loads apps from cache or rescans, with robust error handling."""
+        if self.cache_file.exists():
+            if (
+                datetime.now() - datetime.fromtimestamp(self.cache_file.stat().st_mtime)
+                < self.cache_duration
+            ):
+                try:
+                    with self.cache_file.open("r", encoding="utf-8") as f:
+                        return json.load(f)
+                except (json.JSONDecodeError, OSError):
+                    logger.warning("Cache file is corrupted, rebuilding...")
+                    self.cache_file.unlink(missing_ok=True)
+
+        apps = {}
+        apps.update(self._scan_registry_apps())
+        apps.update(self._scan_start_menu())
+        apps.update(self._scan_store_apps())
+        apps.update(self.memory_manager.get_all_apps())
+
+        try:
+            self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.cache_file.open("w", encoding="utf-8") as f:
+                json.dump(apps, f, indent=4)
+        except OSError as e:
+            logger.error(f"Error writing to cache file: {e}")
+
+        return apps
+
     def _scan_store_apps(self) -> Dict[str, str]:
-        ...   # (kept identical to your last version)
+        """Scans installed Microsoft Store (UWP) apps and normalizes their paths."""
+        apps = {}
+        command = "Get-StartApps | Select-Object Name, AppId | ConvertTo-Json"
+        try:
+            result = subprocess.run(
+                ["powershell", "-Command", command],
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding="utf-8",
+            )
+            if result.stdout:
+                data = json.loads(result.stdout)
+                if isinstance(data, dict):
+                    data = [data]
+
+                for entry in data:
+                    name = entry.get("Name", "").lower()
+                    app_id = entry.get("AppID", "")
+                    if name and app_id:
+                        apps[name] = f"shell:appsFolder\\{app_id}"
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            json.JSONDecodeError,
+        ) as e:
+            logger.error(f"Error scanning Microsoft Store apps: {e}")
+        return apps
 
     def _scan_start_menu(self) -> Dict[str, str]:
-        ...   # (kept identical)
+        """Scans Windows Start Menu, prioritizing .lnk files over .exe files."""
+        apps = {}
+        start_paths = [
+            Path(os.environ["APPDATA"])
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+            Path(os.environ["PROGRAMDATA"])
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs",
+        ]
+        for path in start_paths:
+            if not path.exists():
+                continue
+            for item in path.rglob("*"):
+                if item.suffix.lower() == ".lnk":
+                    apps[item.stem.lower()] = str(item)
+                elif item.suffix.lower() == ".exe" and item.stem.lower() not in apps:
+                    apps[item.stem.lower()] = str(item)
+        return apps
 
     def _scan_registry_apps(self) -> Dict[str, str]:
-        ...   # (kept identical)
+        """Scans the registry for app paths and validates their existence."""
+        apps = {}
+        reg_paths = [
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths",
+        ]
+        for reg_path in reg_paths:
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
+                    for i in range(winreg.QueryInfoKey(key)[0]):
+                        try:
+                            subkey_name = winreg.EnumKey(key, i)
+                            with winreg.OpenKey(key, subkey_name) as subkey:
+                                path, _ = winreg.QueryValueEx(subkey, "")
+                                if path and Path(path).exists():
+                                    apps[Path(subkey_name).stem.lower()] = path
+                        except OSError:
+                            continue
+            except FileNotFoundError:
+                continue
+        return apps
 
     @lru_cache(maxsize=256)
     def find_best_match(self, query: str) -> Optional[str]:
-        ...   # (kept identical)
+        """Finds the best application match using improved fuzzy logic."""
+        if not self.apps:
+            return None
+        if query in self.apps:
+            return query
 
-    def clear_match_cache(self) -> None:
-        try:
-            self.find_best_match.cache_clear()
-            logger.info("App match cache cleared.")
-        except Exception as e:
-            logger.error(f"Error clearing cache: {e}")
+        scorer = fuzz.token_set_ratio
+        matches = process.extractOne(query, self.apps.keys(), scorer=scorer)
+
+        if matches and (matches[1] > 75 or (len(query) <= 4 and matches[1] > 60)):
+            return matches[0]
+
+        return None

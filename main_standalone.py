@@ -1,10 +1,9 @@
-# main_standalone.py - FIXED: Unicode and NoneType errors resolved
+# main_standalone.py - FIXED: Proper asyncio lifecycle management
 import threading
 import queue
 import logging
 import asyncio
 import sys
-import os
 from pathlib import Path
 
 # Add project root to path
@@ -22,9 +21,8 @@ from command_processor import CommandProcessor
 from tts import TextToSpeech
 from predictive_model import PredictiveModel
 from first_run_wizard import should_run_wizard, FirstRunWizard
-from settings_dialog import SettingsDialog
 
-# Setup logging with UTF-8 encoding to fix emoji display on Windows
+# Setup logging with UTF-8 encoding
 log_dir = Path("logs")
 log_dir.mkdir(exist_ok=True)
 
@@ -32,7 +30,6 @@ log_dir.mkdir(exist_ok=True)
 if sys.platform == 'win32':
     try:
         import io
-        # Wrap stdout/stderr to handle Unicode properly
         if hasattr(sys.stdout, 'buffer'):
             sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
         if hasattr(sys.stderr, 'buffer'):
@@ -59,22 +56,23 @@ class AssistantApp:
     
     def __init__(self):
         self.input_queue = queue.Queue()
-        self.mode = "widget"  # widget or full
+        self.mode = "widget"
         self.widget: FloatingWidget = None
         self.full_gui: AssistantGUI = None
         self.system_tray: SystemTray = None
         self.assistant_thread: threading.Thread = None
         self.running = False
+        self.shutdown_event = threading.Event()
         
-        # Components (will be initialized in assistant thread)
+        # Components
         self.processor = None
         self.tts_engine = None
         self.detector = None
+        self.loop = None
         
     def start(self):
         """Start the assistant"""
-        logger.info("[START] Jarvis Assistant starting for MSI Thin 15 B13UC...")
-        logger.info("[SYSTEM] 16GB RAM, RTX 3050 4GB")
+        logger.info("[START] Jarvis Assistant starting...")
         
         # Check first run
         if should_run_wizard():
@@ -82,7 +80,6 @@ class AssistantApp:
             wizard = FirstRunWizard()
             wizard.run()
             
-            # Check if wizard completed
             if not Path(".env").exists():
                 logger.error("Setup wizard incomplete - exiting")
                 return
@@ -124,24 +121,6 @@ class AssistantApp:
         except KeyboardInterrupt:
             self.shutdown()
     
-    def show_full_gui(self):
-        """Switch to full GUI mode"""
-        if self.widget:
-            self.widget.destroy()
-            self.widget = None
-        
-        self.mode = "full"
-        self.full_gui = AssistantGUI(self.input_queue)
-        
-        # Update processor GUI reference
-        if self.processor:
-            self.processor.gui = self.full_gui
-        
-        try:
-            self.full_gui.run()
-        except KeyboardInterrupt:
-            self.shutdown()
-    
     def show_widget_from_tray(self):
         """Show widget from system tray"""
         if not self.widget:
@@ -161,40 +140,64 @@ class AssistantApp:
     def open_settings(self):
         """Open settings dialog"""
         try:
+            from settings_dialog import SettingsDialog
             dialog = SettingsDialog()
             dialog.show()
         except Exception as e:
             logger.error(f"Failed to open settings: {e}")
     
-    def open_stats(self):
-        """Open statistics dashboard"""
-        try:
-            from stats_dashboard import StatsDashboard
-            dashboard = StatsDashboard()
-            threading.Thread(target=dashboard.run, daemon=True).start()
-        except Exception as e:
-            logger.error(f"Failed to open stats: {e}")
-    
     def handle_widget_command(self, event_type: str, data):
-        """Handle commands from floating widget"""
-        if event_type == "OPEN_CHAT":
-            # Switch to full GUI
-            threading.Thread(target=self.show_full_gui, daemon=True).start()
-        elif event_type == "OPEN_SETTINGS":
-            self.open_settings()
-        elif event_type == "SHOW_STATS":
-            self.open_stats()
-        else:
-            # Forward to assistant
-            self.input_queue.put((event_type, data))
+        """Handle commands from floating widget - FIXED error handling"""
+        try:
+            logger.info(f"Widget command: {event_type}")
+            
+            if event_type == "OPEN_CHAT":
+                # Don't open chat, just log for now
+                logger.info("Chat interface not implemented yet - use right-click menu instead")
+                return
+            elif event_type == "OPEN_SETTINGS":
+                self.open_settings()
+            elif event_type == "SHOW_STATS":
+                logger.info("Stats not implemented yet")
+                return
+            elif event_type == "WAKE_WORD_DETECTED":
+                # Voice command triggered
+                self.input_queue.put((event_type, data))
+            else:
+                # Other commands
+                self.input_queue.put((event_type, data))
+        except Exception as e:
+            logger.error(f"Error handling widget command: {e}", exc_info=True)
+    
+    def show_full_gui(self):
+        """Switch to full GUI mode"""
+        if self.widget:
+            self.widget.destroy()
+            self.widget = None
+        
+        self.mode = "full"
+        self.full_gui = AssistantGUI(self.input_queue)
+        
+        if self.processor:
+            self.processor.gui = self.full_gui
+        
+        try:
+            self.full_gui.run()
+        except KeyboardInterrupt:
+            self.shutdown()
     
     def run_assistant_thread(self):
         """Run the main assistant logic"""
-        asyncio.run(self.assistant_logic())
+        try:
+            asyncio.run(self.assistant_logic())
+        except Exception as e:
+            logger.critical(f"[ERROR] Critical error in assistant: {e}", exc_info=True)
+        finally:
+            self.running = False
     
     async def assistant_logic(self):
-        """Main assistant logic loop"""
-        loop = asyncio.get_running_loop()
+        """Main assistant logic loop - FIXED asyncio management"""
+        self.loop = asyncio.get_event_loop()
         
         try:
             # Initialize components
@@ -202,21 +205,20 @@ class AssistantApp:
             predictor = PredictiveModel()
             memory = MemoryManager(predictor)
             self.tts_engine = TextToSpeech()
-            self.tts_engine.start(loop)
             
-            # FIXED: Wrap app scanner in try-catch
+            # Start TTS engine on event loop
+            self.tts_engine.start(self.loop)
+            
+            # Initialize app scanner
             try:
                 apps = AppManager(memory)
                 logger.info(f"[APPS] Found {len(apps.apps)} applications")
             except Exception as e:
                 logger.error(f"[APPS] Error scanning apps: {e}")
-                # Create empty app manager
                 apps = None
             
-            # Get current GUI reference
+            # Create processor
             current_gui = self.widget if self.mode == "widget" else self.full_gui
-            
-            # Create processor (even if apps is None)
             self.processor = CommandProcessor(
                 gui=current_gui,
                 app_manager=apps if apps else self._create_fallback_app_manager(memory),
@@ -224,24 +226,24 @@ class AssistantApp:
                 tts_engine=self.tts_engine,
                 predictor=predictor
             )
-            self.processor.set_event_loop(loop)
+            self.processor.set_event_loop(self.loop)
             
             # Start wake word detector
-            self.detector = WakeWordDetector(self.input_queue, self.tts_engine)
-            detector_task = asyncio.create_task(self.detector.run())
+            try:
+                self.detector = WakeWordDetector(self.input_queue, self.tts_engine)
+                detector_task = asyncio.create_task(self.detector.run())
+            except Exception as e:
+                logger.error(f"[WAKE] Wake word detector failed: {e}")
+                detector_task = None
             
             # STT
-            stt = SpeechToText(
-                Config.WHISPER_MODEL_SIZE,
-                current_gui
-            )
+            stt = SpeechToText(Config.WHISPER_MODEL_SIZE, current_gui)
             
-            # Load models in background
-            asyncio.create_task(self.preload_models(stt, apps))
+            # Preload models
+            await self.preload_models(stt, apps)
             
-            logger.info("[READY] Jarvis is ready! Say 'Hey Jarvis' or click the orb")
+            logger.info("[READY] Jarvis is ready! Say 'Hey Jarvis' or press Ctrl+Space")
             
-            # Update system tray
             if self.system_tray:
                 self.system_tray.notify(
                     "Jarvis Ready",
@@ -249,78 +251,104 @@ class AssistantApp:
                     duration=3
                 )
             
-            # Main event loop
-            while self.running:
+            # Main event loop - FIXED: Proper event handling
+            while self.running and not self.shutdown_event.is_set():
                 try:
-                    event_type, data = await asyncio.wait_for(
-                        loop.run_in_executor(None, self.input_queue.get),
-                        timeout=1.0
-                    )
-                except asyncio.TimeoutError:
-                    continue
-                
-                if event_type == "EXIT":
-                    break
-                
-                # Update states
-                if self.widget:
-                    self.widget.set_state("thinking")
-                if self.system_tray:
-                    self.system_tray.update_icon("thinking")
-                
-                command_text = None
-                
-                if event_type == "WAKE_WORD_DETECTED":
-                    if self.widget:
-                        self.widget.set_state("listening")
-                    if self.system_tray:
-                        self.system_tray.update_icon("listening")
+                    # Use a timeout to check shutdown_event regularly
+                    try:
+                        event_type, data = await asyncio.wait_for(
+                            self.loop.run_in_executor(None, self.input_queue.get),
+                            timeout=1.0
+                        )
+                    except asyncio.TimeoutError:
+                        continue
                     
-                    command_text = await asyncio.to_thread(stt.listen_and_transcribe)
+                    # Check if we should shut down
+                    if self.shutdown_event.is_set():
+                        break
                     
-                elif event_type == "TEXT_COMMAND":
-                    command_text = data
+                    if event_type == "EXIT":
+                        break
                     
-                elif event_type == "SUGGESTION_ACCEPT":
-                    command_text = self.processor.handle_suggestion_accept(data)
-                    
-                elif event_type == "SUGGESTION_DISMISS":
-                    self.processor.handle_suggestion_dismiss(data)
-                    continue
-                
-                if command_text:
+                    # Update states
                     if self.widget:
                         self.widget.set_state("thinking")
                     if self.system_tray:
                         self.system_tray.update_icon("thinking")
                     
-                    result = await self.processor.execute(command_text)
+                    command_text = None
                     
-                    if result == "exit":
-                        self.running = False
-                        break
+                    if event_type == "WAKE_WORD_DETECTED":
+                        if self.widget:
+                            self.widget.set_state("listening")
+                        if self.system_tray:
+                            self.system_tray.update_icon("listening")
+                        
+                        command_text = await asyncio.to_thread(stt.listen_and_transcribe)
+                        
+                    elif event_type == "TEXT_COMMAND":
+                        command_text = data
+                        
+                    elif event_type == "SUGGESTION_ACCEPT":
+                        command_text = self.processor.handle_suggestion_accept(data)
+                        
+                    elif event_type == "SUGGESTION_DISMISS":
+                        self.processor.handle_suggestion_dismiss(data)
+                        continue
+                    
+                    if command_text:
+                        if self.widget:
+                            self.widget.set_state("thinking")
+                        if self.system_tray:
+                            self.system_tray.update_icon("thinking")
+                        
+                        result = await self.processor.execute(command_text)
+                        
+                        if result == "exit":
+                            self.running = False
+                            break
+                    
+                    # Back to idle
+                    if self.widget:
+                        self.widget.set_state("idle")
+                    if self.system_tray:
+                        self.system_tray.update_icon("idle")
                 
-                # Back to idle
-                if self.widget:
-                    self.widget.set_state("idle")
-                if self.system_tray:
-                    self.system_tray.update_icon("idle")
+                except asyncio.CancelledError:
+                    logger.info("Assistant task cancelled")
+                    break
+                except Exception as e:
+                    logger.error(f"[ERROR] Event loop error: {e}", exc_info=False)
+                    if self.widget:
+                        self.widget.set_state("idle")
             
             # Cleanup
             logger.info("[SHUTDOWN] Shutting down...")
-            self.detector.stop()
-            await detector_task
-            await self.processor.close()
-            self.tts_engine.close()
+            
+            # Stop detector
+            if detector_task and self.detector:
+                try:
+                    self.detector.stop()
+                    await detector_task
+                except Exception as e:
+                    logger.warning(f"Error stopping detector: {e}")
+            
+            # Close processor
+            if self.processor:
+                try:
+                    await self.processor.close()
+                except Exception as e:
+                    logger.warning(f"Error closing processor: {e}")
+            
+            # Close TTS
+            if self.tts_engine:
+                try:
+                    self.tts_engine.close()
+                except Exception as e:
+                    logger.warning(f"Error closing TTS: {e}")
             
         except Exception as e:
-            logger.critical("[ERROR] Critical error: %s", e, exc_info=True)
-            if self.system_tray:
-                self.system_tray.notify(
-                    "Jarvis Error",
-                    f"Critical error occurred: {str(e)[:50]}",
-                    duration=5
-                )
+            logger.critical(f"[CRITICAL] Unexpected error: {e}", exc_info=True)
         finally:
             self.running = False
             logger.info("[STOPPED] Assistant stopped")
@@ -339,11 +367,9 @@ class AssistantApp:
         try:
             logger.info("[MODELS] Loading models...")
             
-            # Show loading state
             if self.widget:
                 self.widget.set_state("thinking")
             
-            # Load in parallel
             tasks = [asyncio.to_thread(stt.load_model)]
             if apps:
                 tasks.append(asyncio.to_thread(lambda: apps.apps))
@@ -352,7 +378,6 @@ class AssistantApp:
             
             logger.info("[MODELS] Models loaded successfully")
             
-            # Back to idle
             if self.widget:
                 self.widget.set_state("idle")
                 
@@ -363,15 +388,22 @@ class AssistantApp:
         """Graceful shutdown"""
         logger.info("[EXIT] Goodbye!")
         self.running = False
+        self.shutdown_event.set()
         self.input_queue.put(("EXIT", None))
         
-        # Stop system tray
+        # Stop components
         if self.system_tray:
-            self.system_tray.stop()
+            try:
+                self.system_tray.stop()
+            except:
+                pass
         
-        # Destroy widgets
         if self.widget:
-            self.widget.destroy()
+            try:
+                self.widget.destroy()
+            except:
+                pass
+        
         if self.full_gui:
             try:
                 self.full_gui.root.quit()
@@ -387,7 +419,6 @@ class AssistantApp:
 
 def main():
     """Entry point"""
-    # Print banner (ASCII art, no emojis)
     print("""
 ========================================
         JARVIS AI ASSISTANT

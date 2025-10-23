@@ -27,6 +27,7 @@ aiohttp>=3.9.4
 python-dotenv>=1.0.0
 certifi>=2023.7.22
 rapidfuzz>=3.6.0
+spacy>=3.8.0
 
 # ========== GUI & Widgets ==========
 customtkinter>=5.2.2
